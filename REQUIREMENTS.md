@@ -15,6 +15,50 @@ account using a downloaded X data archive.
 - Optional flag: --limit <int|all> how many posts to delete (default: all)
 - Optional flag: --delay <float> seconds between requests (default: 1.0)
 
+### X Archive Parsing
+- The archive contains the following relevant files:
+  - data/tweets.js    → your own posts and replies
+                        format: window.YTD.tweets.part0 = [...]
+  - data/retweets.js  → your reposts of other people's posts
+                        format: window.YTD.retweet.part0 = [...]
+
+- Parsing approach for both files:
+  - Strip the JS variable assignment prefix to get valid JSON
+  - The prefix pattern varies per file (e.g. window.YTD.tweets.part0 =,
+    window.YTD.retweet.part0 =), so strip everything up to and including
+    the first = sign, then parse the remaining JSON array
+
+- From data/tweets.js extract per entry:
+  - tweet.id_str        → post ID used for DELETE /2/tweets/:id
+  - tweet.created_at    → date string, format: "Wed Oct 10 20:19:24 +0000 2018"
+  - tweet.full_text     → used to detect replies (starts with @) and for dry-run display
+  - tweet.in_reply_to_user_id → if present and non-empty, the post is a reply
+
+- From data/retweets.js extract per entry:
+  - retweet.id_str                  → ID of your repost action
+  - retweet.created_at              → date of when you reposted
+  - retweet.retweeted_status.id_str → source tweet ID used for
+                                      DELETE /2/users/{id}/retweets/{source_tweet_id}
+
+- Classify tweets.js entries into two categories:
+  - Reply: in_reply_to_user_id is present and non-empty, OR full_text starts with @
+  - Post:  everything else
+
+- If a file is not found, the relevant command should warn the user and skip
+  that file gracefully rather than exiting (e.g. if retweets.js is missing,
+  unrepost command exits with a clear message; analyze command notes it as
+  "retweets.js not found" in the report)
+
+- Parse created_at using the format: "Wed Oct 10 20:19:24 +0000 2018"
+  Use datetime.strptime with "%a %b %d %H:%M:%S %z %Y"
+  All datetime comparisons must be timezone-aware (UTC)
+
+### Authentication
+- Read credentials from a .env file in the same directory as the script
+- Required env vars: X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
+- Use OAuth 1.0a via the tweepy library (needed for user-context delete)
+- Use X API v2 endpoint: DELETE /2/tweets/:id
+
 ### Analyze command
 - Add a subcommand: x_eraser.py analyze <archive-path>
 - No API calls needed, reads only from the local archive files
@@ -50,28 +94,73 @@ account using a downloaded X data archive.
   in_reply_to_user_id field is present in the tweet object
 - Write analysis output to x_eraser.log as well
 
-### X Archive Parsing
-- The archive contains a file at data/tweets.js (format: window.YTD.tweets.part0 = [...])
-- Strip the JS variable assignment to get valid JSON
-- Extract tweet id_str and created_at from each tweet object
-- Parse created_at using the format Twitter uses: "Wed Oct 10 20:19:24 +0000 2018"
+### Unrepost command / logic
+- Add a subcommand: x_eraser.py unrepost <archive> --older-than <threshold>
+- Endpoint: DELETE /2/users/{id}/retweets/{source_tweet_id}
+  (source: https://docs.x.com/x-api/users/unrepost-post)
+- Parse reposts from data/retweets.js in the archive
+- Extract the source tweet ID (the original post that was reposted) from each repost entry
+- Filter by --older-than threshold using the repost's created_at date
+- Sort by date ascending (oldest first)
+- Apply --limit flag (same behaviour as delete command: integer or all, default: all)
+- Optional flag: --dry-run (list what would be unreposted without making API calls)
+- Optional flag: --delay <float> seconds between requests (default: 1.0)
 
-### Authentication
-- Read credentials from a .env file in the same directory as the script
-- Required env vars: X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
-- Use OAuth 1.0a via the tweepy library (needed for user-context delete)
-- Use X API v2 endpoint: DELETE /2/tweets/:id
+- Same rate limit as delete: 50 requests per 15 minutes
+- Catch HTTP 429, wait for x-rate-limit-reset header + 5s buffer, then retry
+- If already unreposted (404 or retweeted: false response): silently skip,
+  do not count as error
+- On other API errors: log and continue
 
-### Deletion logic
-- Filter all tweets where created_at < (now - threshold)
-- Sort filtered tweets by date ascending (oldest first)
-- Apply --limit to the sorted list before deletion (e.g. --limit 100 deletes the oldest 100)
+- Output follows same pattern as delete command:
+  - "Found X reposts older than [threshold]."
+  - "Unreposting [limit] reposts (oldest first)."
+  - "Estimated API cost: $Y.YY (Z unrepost calls x $0.01)"
+  - "Estimated time: ~Xh Ymin at current rate limits (50 requests / 15 min)."
+  - Progress: "[12/567] Unreposted source tweet 1346889436626259968 (2021-03-14)"
+  - On completion: "Done. Unreposted X posts. Y errors."
+  - 
+### Deletion command / logic
+- delete command handles two types of entries from the archive:
+  - Original posts (from data/tweets.js where in_reply_to_user_id is empty)
+  - Replies (from data/tweets.js where in_reply_to_user_id is present)
+  - Both use the same endpoint: DELETE /2/tweets/:id
+  - Reposts are NOT handled by the delete command, use the unrepost command instead
+
+- Filter all entries where created_at < (now UTC - threshold)
+- Sort filtered entries by created_at ascending (oldest first)
+- Apply --limit to the sorted list before deletion
+  (e.g. --limit 100 deletes the oldest 100, default: all)
+
+- Optional flag: --include-replies (default: false)
+  Without this flag, only original posts are deleted, replies are skipped
+  With this flag, both original posts and replies are deleted
+  Always clearly indicate in the pre-run summary which types are included
+
 - DELETE /2/tweets/:id is the only available endpoint — there is no batch delete
-- One tweet per request, max 50 requests per 15-minute window (rate limit from X API)
+- One post per request, max 50 requests per 15-minute window
 - Process sequentially, respect the 50/15min rate limit
 - Catch HTTP 429, wait for x-rate-limit-reset header + 5s buffer, then retry
-- On other API errors: log the error and continue to next tweet
-- After each deleted tweet, wait --delay seconds (default: 1.0)
+- On other API errors: log the error and continue to next post
+- After each deleted post, wait --delay seconds (default: 1.0)
+
+- Pre-run summary must show:
+  - "Found X posts [and Y replies] older than [threshold]."
+  - "Deleting [limit] entries (oldest first)."
+  - "Replies included: yes/no (use --include-replies to change)"
+  - "Estimated API cost: $Y.YY (Z deletes x $0.01)"
+  - "Estimated time: ~Xh Ymin at current rate limits (50 deletes / 15 min)."
+  - In dry-run: prefix all output with [DRY RUN], skip time estimate
+
+- Progress output per deletion:
+  - "[342/1000] Deleted post    1234567890 (2021-03-14): first 60 chars of text..."
+  - "[343/1000] Deleted reply   1234567891 (2021-03-15): first 60 chars of text..."
+
+- On completion: "Done. Deleted X posts. Y replies. Z errors."
+
+- Error handling:
+  - 404 (already deleted): silently skip, do not count as error
+  - KeyboardInterrupt: print summary of what was deleted so far and exit cleanly
 
 ### Pricing
 - Define a hardcoded constant at the top of the script: COST_PER_DELETE_USD = 0.01
@@ -153,11 +242,14 @@ account using a downloaded X data archive.
 python3 x_eraser.py analyze <archive>
 
 # Dry run first
-python3 x_eraser.py ~/x-archive --older-than 3m --dry-run
+python3 x_eraser.py <archive> --older-than <threshold> [--dry-run]
 
 # Delete for real
-python3 x_eraser.py ~/x-archive --older-than 3m
+python3 x_eraser.py <archive> --older-than 3m
+
+# Unrepost
+python3 x_eraser.py unrepost <archive> --older-than <threshold> [--dry-run]
 
 # Other threshold examples
-python3 x_eraser.py ~/x-archive --older-than 90d
-python3 x_eraser.py ~/x-archive --older-than 1y --dry-run
+python3 x_eraser.py <archive> --older-than 90d
+python3 x_eraser.py <archive> --older-than 1y [--dry-run]
