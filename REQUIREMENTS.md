@@ -21,6 +21,7 @@ account using a downloaded X data archive.
 - No credentials required for this command
 - Output a summary report:
 
+```bash
   Archive Analysis
   ----------------
   Posts (original):   1,234
@@ -39,6 +40,7 @@ account using a downloaded X data archive.
     ────────────────────────
     Total affected:     235
     Estimated cost:   $2.35
+```
 
 - Optional flag: --older-than (same syntax as delete command) to show
   how many entries would be affected by that threshold
