@@ -15,6 +15,39 @@ account using a downloaded X data archive.
 - Optional flag: --limit <int|all> how many posts to delete (default: all)
 - Optional flag: --delay <float> seconds between requests (default: 1.0)
 
+### Analyze command
+- Add a subcommand: x_eraser.py analyze <archive-path>
+- No API calls needed, reads only from the local archive files
+- No credentials required for this command
+- Output a summary report:
+
+  Archive Analysis
+  ----------------
+  Posts (original):   1,234
+  Reposts:              567
+  Replies:              890
+  ─────────────────────────
+  Total:              2,691
+
+  Oldest post:  2009-11-03
+  Newest post:  2026-04-14
+
+  With --older-than 3m:
+    Posts to delete:    123
+    Reposts to undo:     45
+    Replies to delete:   67
+    ────────────────────────
+    Total affected:     235
+    Estimated cost:   $2.35
+
+- Optional flag: --older-than (same syntax as delete command) to show
+  how many entries would be affected by that threshold
+- Parse posts from data/tweets.js
+- Parse reposts from data/retweets.js
+- Detect replies by checking if tweet text starts with @ or if
+  in_reply_to_user_id field is present in the tweet object
+- Write analysis output to x_eraser.log as well
+
 ### X Archive Parsing
 - The archive contains a file at data/tweets.js (format: window.YTD.tweets.part0 = [...])
 - Strip the JS variable assignment to get valid JSON
@@ -113,6 +146,9 @@ account using a downloaded X data archive.
 - Secrets: GITHUB_TOKEN & SONAR_TOKEN (from GitHub repository secrets)
 
 ## Example usage
+
+# Analyze
+python3 x_eraser.py analyze <archive>
 
 # Dry run first
 python3 x_eraser.py ~/x-archive --older-than 3m --dry-run
